@@ -2,6 +2,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <unistd.h>
 
@@ -165,12 +166,25 @@ META_COMMAND_RESULT selectAndDoMetaCommand(const std::string &inputLine,
 
 /* Matches the command with their type */
 PREPARE_RESULT prepareCommand(const std::string &inputLine, Command &command) {
-  std::string commandPrefix = inputLine.substr(0, 6);
-  if (commandPrefix == "select") {
+  std::stringstream inputArgStream(inputLine);
+  std::string whichCommand;
+  inputArgStream >> whichCommand;
+
+  if (whichCommand == "SELECT") {
     command.type = COMMAND_SELECT;
     return PREPARE_SUCCESS;
-  } else if (commandPrefix == "insert") {
+  } else if (whichCommand == "INSERT") {
     command.type = COMMAND_INSERT;
+    std::string userName, email;
+    uint32_t id;
+
+    if (!(inputArgStream >> id >> userName >> email))
+      return PREPARE_SYNTAX_ERROR;
+
+    command.toBeInserted.id = id;
+    strlcpy(command.toBeInserted.username, userName.c_str(), sizeof userName);
+    strlcpy(command.toBeInserted.email, email.c_str(), sizeof email);
+
     return PREPARE_SUCCESS;
   }
   return PREPARE_UNRECOGNIZED_STATE;
