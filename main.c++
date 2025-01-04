@@ -16,7 +16,9 @@ typedef enum {
 typedef enum {
   PREPARE_SUCCESS,
   PREPARE_UNRECOGNIZED_STATE,
-  PREPARE_SYNTAX_ERROR
+  PREPARE_SYNTAX_ERROR,
+  PREPARE_STRING_TOO_LONG,
+  PREPARE_NEGATIVE_ID
 } PREPARE_RESULT;
 
 /* Constants for Command type */
@@ -38,12 +40,12 @@ typedef enum { EXECUTE_SUCCESS, EXECUTE_TABLE_FULL } EXECUTE_RESULT;
 #define COLUMN_EMAIL_SIZE 255
 typedef struct {
   uint32_t id;
-  char username[COLUMN_USERNAME_SIZE];
-  char email[COLUMN_EMAIL_SIZE];
+  char username[COLUMN_USERNAME_SIZE + 1];
+  char email[COLUMN_EMAIL_SIZE + 1];
 } Row;
 
 /* Priting Rows */
-void printRow(Row *row) {
+inline void printRow(Row *row) {
   std::cout << "ID: " << row->id << ", Username: " << row->username
             << ", Email: " << row->email << "\n";
 }
@@ -128,7 +130,7 @@ void *row_slot(Table *table, uint32_t rowNum) {
 /**
  * @brief Displays the default SQLite prompt
  */
-void displayDefault() { std::cout << "SQLite > "; }
+inline void displayDefault() { std::cout << "SQLite > "; }
 
 /**
  * @brief Cleanup function called before exit
@@ -166,7 +168,7 @@ META_COMMAND_RESULT selectAndDoMetaCommand(const std::string &inputLine,
 
 /* Matches the command with their type */
 PREPARE_RESULT prepareCommand(const std::string &inputLine, Command &command) {
-  std::stringstream inputArgStream(inputLine);
+  std::istringstream inputArgStream(inputLine);
   std::string whichCommand;
   inputArgStream >> whichCommand;
 
@@ -175,15 +177,31 @@ PREPARE_RESULT prepareCommand(const std::string &inputLine, Command &command) {
     return PREPARE_SUCCESS;
   } else if (whichCommand == "INSERT") {
     command.type = COMMAND_INSERT;
-    std::string userName, email;
-    uint32_t id;
+    std::string usrName, email;
+    int64_t id;
 
-    if (!(inputArgStream >> id >> userName >> email))
+    if (!(inputArgStream >> id >> usrName >> email)) {
       return PREPARE_SYNTAX_ERROR;
+    }
+
+    if (id < 0) {
+      return PREPARE_NEGATIVE_ID;
+    }
+
+    if (usrName.size() > COLUMN_USERNAME_SIZE ||
+        email.size() >= COLUMN_EMAIL_SIZE) {
+      return PREPARE_STRING_TOO_LONG;
+    }
 
     command.toBeInserted.id = id;
-    strlcpy(command.toBeInserted.username, userName.c_str(), sizeof userName);
-    strlcpy(command.toBeInserted.email, email.c_str(), sizeof email);
+    std::strncpy(command.toBeInserted.username, usrName.c_str(),
+                 sizeof(command.toBeInserted.username) - 1);
+    command.toBeInserted.username[sizeof(command.toBeInserted.username) - 1] =
+        '\0';
+
+    std::strncpy(command.toBeInserted.email, email.c_str(),
+                 sizeof(command.toBeInserted.username) - 1);
+    command.toBeInserted.email[sizeof(command.toBeInserted.email) - 1] = '\0';
 
     return PREPARE_SUCCESS;
   }
@@ -268,9 +286,14 @@ int main(int argc, char **argv) {
     case PREPARE_SYNTAX_ERROR:
       std::cout << "Syntax error. Could not parse command.\n";
       continue;
+    case PREPARE_STRING_TOO_LONG:
+      std::cout << "String too long. Could not insert.\n";
+      continue;
+    case PREPARE_NEGATIVE_ID:
+      std::cout << "Negative ID. Could not insert.\n";
+      continue;
     case PREPARE_UNRECOGNIZED_STATE:
-      std::cout << "Unrecognized keyword at the start of '" << inputLine
-                << "'\n";
+      std::cout << "Unrecognized keyword in '" << inputLine << "'\n";
       continue;
     }
 
