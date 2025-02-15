@@ -90,6 +90,38 @@ typedef struct {
   Pager *pager;
 } Table;
 
+/* Represents location in the Table */
+typedef struct {
+  Table *table;
+  uint32_t rowNum;
+  bool endOfTable; // Indicates a position one before the last element
+} Cursor;
+
+/* Create new Cursor for the Start of Table */
+Cursor *tableStart(Table *table) {
+  Cursor *cursor = (Cursor *)malloc(sizeof(Cursor));
+  cursor->table = table;
+  cursor->rowNum = 0;
+  cursor->endOfTable = table->numRows == 0;
+  return cursor;
+}
+
+/* Create new Cursor for the End of Table */
+Cursor *tableEnd(Table *table) {
+  Cursor *cursor = (Cursor *)malloc(sizeof(Cursor));
+  cursor->table = table;
+  cursor->rowNum = table->numRows;
+  cursor->endOfTable = true;
+  return cursor;
+}
+
+void cursorAdvance(Cursor *cursor) {
+  ++cursor->rowNum;
+  if (cursor->rowNum >= cursor->table->numRows) {
+    cursor->endOfTable = true;
+  }
+}
+
 /**
  * @brief Opens DB file and keeps track of its size. Also initialize the page
  *        cache to all null
@@ -188,12 +220,13 @@ void *getPage(Pager *pager, uint32_t pageNum) {
 }
 
 /* Page Management */
-void *row_slot(Table *table, uint32_t rowNum) {
+void *cursorValue(Cursor *cursor) {
+  uint32_t rowNum = cursor->rowNum;
   uint32_t pageNum = rowNum / ROWS_PER_PAGE;
   uint32_t rowOffset = rowNum % ROWS_PER_PAGE;
   uint32_t byteOffset = rowOffset * ROW_SIZE;
 
-  void *page = getPage(table->pager, pageNum);
+  void *page = getPage(cursor->table->pager, pageNum);
   return reinterpret_cast<void *>((static_cast<uint8_t *>(page) + byteOffset));
 }
 
@@ -342,19 +375,27 @@ EXECUTE_RESULT executeInsertCommand(Command &command, Table &table) {
     return EXECUTE_TABLE_FULL;
   }
   Row *rowToinsert = &(command.toBeInserted);
-  structureRow(rowToinsert, row_slot(&table, table.numRows));
+  Cursor *cursor = tableEnd(&table);
+  structureRow(rowToinsert, cursorValue(cursor));
   ++table.numRows;
+
+  free(cursor);
 
   return EXECUTE_SUCCESS;
 }
 
 /* Executing the SELECT command */
 EXECUTE_RESULT executeSelectCommand(Command &command, Table &table) {
+  Cursor *cursor = tableStart(&table);
   Row row;
-  for (uint32_t i = 0; i < table.numRows; ++i) {
-    destructureRow(row_slot(&table, i), &row);
+
+  while (!(cursor->endOfTable)) {
+    destructureRow(cursorValue(cursor), &row);
     printRow(&row);
+    cursorAdvance(cursor);
   }
+
+  free(cursor);
 
   return EXECUTE_SUCCESS;
 }
