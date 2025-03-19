@@ -26,9 +26,13 @@ typedef enum {
 /* Constants for Command type */
 typedef enum { COMMAND_SELECT, COMMAND_INSERT } COMMAND_TYPE;
 
-typedef enum { EXECUTE_SUCCESS, EXECUTE_TABLE_FULL } EXECUTE_RESULT;
+typedef enum {
+  EXECUTE_SUCCESS,
+  EXECUTE_DUPLICATE_KEY,
+  EXECUTE_TABLE_FULL
+} EXECUTE_RESULT;
 
-typedef enum { NODE_INTERNAL, NODE_LEAF } nodeType;
+typedef enum { NODE_INTERNAL, NODE_LEAF } NodeType;
 
 /* Row Structure and Constants :
           Row Structure:
@@ -59,7 +63,7 @@ const uint32_t EMAIL_OFFSET = USERNAME_OFFSET + USERNAME_SIZE;
 const uint32_t ROW_SIZE = ID_SIZE + USERNAME_SIZE + EMAIL_SIZE;
 
 /* Paging System */
-const uint32_t PAGE_SIZE = 4096;  // 4 KB (common OS page size)
+const uint32_t PAGE_SIZE = 4096; // 4 KB (common OS page size)
 #define TABLE_MAX_PAGES 100
 
 /**
@@ -122,15 +126,24 @@ const uint32_t LEAF_NODE_KEY_SIZE = sizeof(uint32_t);
 const uint32_t LEAF_NODE_KEY_OFFSET = 0;
 const uint32_t LEAF_NODE_VALUE_SIZE = ROW_SIZE;
 const uint32_t LEAF_NODE_VALUE_OFFSET =
-
     LEAF_NODE_KEY_OFFSET + LEAF_NODE_KEY_SIZE;
 const uint32_t LEAF_NODE_CELL_SIZE = LEAF_NODE_KEY_SIZE + LEAF_NODE_VALUE_SIZE;
 const uint32_t LEAF_NODE_SPACE_FOR_CELLS = PAGE_SIZE - LEAF_NODE_HEADER_SIZE;
 const uint32_t LEAF_NODE_MAX_CELLS =
     LEAF_NODE_SPACE_FOR_CELLS / LEAF_NODE_CELL_SIZE;
 
+NodeType getNodeType(void *node) {
+  uint8_t value = *((uint8_t *)node + NODE_TYPE_OFFSET);
+  return (NodeType)value;
+}
+
+void setNodeType(void *node, NodeType type) {
+  uint8_t value = type;
+  *((uint8_t *)node + NODE_TYPE_OFFSET) = value;
+}
+
 /* Forward declarations */
-typedef struct Pager Pager;  // Forward declaration
+typedef struct Pager Pager; // Forward declaration
 void *getPage(Pager *pager, uint32_t pageNum);
 
 /**
@@ -158,7 +171,7 @@ typedef struct {
   Table *table;
   uint32_t pageNum;
   uint32_t cellNum;
-  bool endOfTable;  // Indicates a position one before the last element
+  bool endOfTable; // Indicates a position one before the last element
 } Cursor;
 
 /**
@@ -207,10 +220,8 @@ void *leafNodeValue(void *node, uint32_t cellNum) {
 }
 
 void initializeLeafNode(void *node) {
+  setNodeType(node, NODE_LEAF);
   *leafNodeNumCells(node) = 0;
-  // Set node type to leaf
-  *(uint8_t *)((char *)node + NODE_TYPE_OFFSET) =
-      NODE_LEAF;  // Added: set node type
 }
 
 /* Priting Rows */
@@ -241,7 +252,7 @@ void printLeafNode(void *node) {
 
 typedef struct {
   COMMAND_TYPE type;
-  Row toBeInserted;  // only used by INSERT command
+  Row toBeInserted; // only used by INSERT command
 } Command;
 
 /**
@@ -253,10 +264,10 @@ typedef struct {
  */
 Pager *pagerOpen(const std::string &fileName) {
   int fileDesc = open(fileName.c_str(),
-                      O_RDWR |      // Read/Write mode
-                          O_CREAT,  // Create file if it doesn't exist
-                      S_IWUSR |     // User write permission
-                          S_IRUSR   // User read permission
+                      O_RDWR |     // Read/Write mode
+                          O_CREAT, // Create file if it doesn't exist
+                      S_IWUSR |    // User write permission
+                          S_IRUSR  // User read permission
   );
 
   if (fileDesc == -1) {
@@ -327,7 +338,7 @@ Table *dbOpen(const std::string &fileName) {
   table->pager = pager;
   table->rootPageNum = 0;
 
-  if (pager->numPages == 0) {  // New DB file. Initialize page 0 as leaf node.
+  if (pager->numPages == 0) { // New DB file. Initialize page 0 as leaf node.
     void *rootNode = getPage(pager, 0);
     initializeLeafNode(rootNode);
   }
@@ -376,6 +387,58 @@ void cursorAdvance(Cursor *cursor) {
   }
 }
 
+/**
+ * @brief Find the leaf node for the given table's key
+ *
+ * @param table
+ * @param pageNum
+ * @param key
+ * @return Cursor pointer
+ * @note The position of the key or the position of the another key that needs
+ * to move if new key needs to be inserted, or the position one past the last
+ * key.
+ */
+Cursor *leafNodeFind(Table *table, uint32_t pageNum, uint32_t key) {
+  void *node = getPage(table->pager, pageNum);
+  uint32_t numCells = *leafNodeNumCells(node);
+
+  Cursor *cursor = (Cursor *)malloc(sizeof(Cursor));
+  cursor->table = table;
+  cursor->pageNum = pageNum;
+
+  // Binary Search
+  uint32_t minInd = 0;
+  uint32_t oneBeforeMaxInd = numCells;
+  while (oneBeforeMaxInd != minInd) {
+    uint32_t ind = (minInd + oneBeforeMaxInd) / 2;
+    uint32_t keyAtInd = *leafNodeKey(node, ind);
+    if (key == keyAtInd) {
+      cursor->cellNum = ind;
+      return cursor;
+    }
+    if (key < keyAtInd) {
+      oneBeforeMaxInd = ind;
+    } else {
+      minInd = ind + 1;
+    }
+  }
+
+  cursor->cellNum = minInd;
+  return cursor;
+}
+
+Cursor *tableFind(Table *table, uint32_t key) {
+  uint32_t rootPageNum = table->rootPageNum;
+  void *rootNode = getPage(table->pager, rootPageNum);
+
+  if (NODE_LEAF == getNodeType(rootNode)) {
+    return leafNodeFind(table, rootPageNum, key);
+  } else {
+    std::cerr << "Need to implement searching an internal node\n";
+    exit(EXIT_FAILURE);
+  }
+}
+
 /* Structure and De-structure Rows */
 void structureRow(Row *src, void *dst) {
   memcpy((char *)dst + ID_OFFSET, &(src->id), ID_SIZE);
@@ -418,12 +481,12 @@ void leafNodeInsert(Cursor *cursor, uint32_t key, Row *value) {
   void *node = getPage(cursor->table->pager, cursor->pageNum);
   uint32_t numCells = *leafNodeNumCells(node);
 
-  if (numCells >= LEAF_NODE_MAX_CELLS) {  // Node is Full.
+  if (numCells >= LEAF_NODE_MAX_CELLS) { // Node is Full.
     std::cout << "Need to implement splitting a leaf node.\n";
     exit(EXIT_FAILURE);
   }
 
-  if (cursor->cellNum < numCells) {  // Make room for new cell.
+  if (cursor->cellNum < numCells) { // Make room for new cell.
     for (uint32_t i = numCells; i > cursor->cellNum; --i) {
       memcpy(leafNodeCell(node, i), leafNodeCell(node, i - 1),
              LEAF_NODE_CELL_SIZE);
@@ -447,7 +510,8 @@ void dbClose(Table *table) {
   Pager *pager = table->pager;
 
   for (uint32_t i = 0; i < pager->numPages; ++i) {
-    if (pager->pages[i] == nullptr) continue;
+    if (pager->pages[i] == nullptr)
+      continue;
     pagerFlush(pager, i);
     free(pager->pages[i]);
     pager->pages[i] = nullptr;
@@ -552,11 +616,20 @@ PREPARE_RESULT prepareCommand(const std::string &inputLine, Command &command) {
 /* Executing the INSERT command */
 EXECUTE_RESULT executeInsertCommand(Command &command, Table &table) {
   void *node = getPage(table.pager, table.rootPageNum);
-  if (*leafNodeNumCells(node) >= LEAF_NODE_MAX_CELLS) {
+  uint32_t numCells = *leafNodeNumCells(node);
+  if (numCells >= LEAF_NODE_MAX_CELLS) {
     return EXECUTE_TABLE_FULL;
   }
   Row *rowToinsert = &(command.toBeInserted);
-  Cursor *cursor = tableEnd(&table);
+  uint32_t keyToBeInserted = rowToinsert->id;
+  Cursor *cursor = tableFind(&table, keyToBeInserted);
+
+  if (cursor->cellNum < numCells) {
+    uint32_t keyAtIndex = *leafNodeKey(node, cursor->cellNum);
+    if (keyAtIndex == keyToBeInserted) {
+      return EXECUTE_DUPLICATE_KEY;
+    }
+  }
   leafNodeInsert(cursor, rowToinsert->id, rowToinsert);
   free(cursor);
 
@@ -582,11 +655,12 @@ EXECUTE_RESULT executeSelectCommand(Command &command, Table &table) {
 /* Execute the logic behind the command */
 EXECUTE_RESULT executeCommand(Command &command, Table &table) {
   switch (command.type) {
-    case COMMAND_INSERT:
-      return executeInsertCommand(command, table);
-    case COMMAND_SELECT:
-      return executeSelectCommand(command, table);
+  case COMMAND_INSERT:
+    return executeInsertCommand(command, table);
+  case COMMAND_SELECT:
+    return executeSelectCommand(command, table);
   }
+  return EXECUTE_TABLE_FULL;
 }
 
 /**
@@ -608,7 +682,7 @@ int main(int argc, char **argv) {
 
     if ((readLine(inputLine)) < 0) {
       if (std::cin.eof()) {
-        std::cout << "\n";  // Add newline for EOF
+        std::cout << "\n"; // Add newline for EOF
         closeInput();
         dbClose(table);
         return EXIT_SUCCESS;
@@ -626,41 +700,44 @@ int main(int argc, char **argv) {
     /* Handling Meta commands */
     if (inputLine[0] == '.') {
       switch (selectAndDoMetaCommand(inputLine, table)) {
-        case (META_COMMAND_SUCCESS):
-          continue;
-        case (META_UNRECOGNIZED_COMMAND):
-          std::cout << "Unexpected Input: '" << inputLine << "'\n";
-          continue;
+      case (META_COMMAND_SUCCESS):
+        continue;
+      case (META_UNRECOGNIZED_COMMAND):
+        std::cout << "Unexpected Input: '" << inputLine << "'\n";
+        continue;
       }
     }
 
     /* Handling Non-Meta commands */
     Command command;
     switch (prepareCommand(inputLine, command)) {
-      case PREPARE_SUCCESS:
-        break;
-      case PREPARE_SYNTAX_ERROR:
-        std::cout << "Syntax error. Could not parse command.\n";
-        continue;
-      case PREPARE_STRING_TOO_LONG:
-        std::cout << "String too long. Could not insert.\n";
-        continue;
-      case PREPARE_NEGATIVE_ID:
-        std::cout << "Negative ID. Could not insert.\n";
-        continue;
-      case PREPARE_UNRECOGNIZED_STATE:
-        std::cout << "Unrecognized keyword in '" << inputLine << "'\n";
-        continue;
+    case PREPARE_SUCCESS:
+      break;
+    case PREPARE_SYNTAX_ERROR:
+      std::cout << "Syntax error. Could not parse command.\n";
+      continue;
+    case PREPARE_STRING_TOO_LONG:
+      std::cout << "String too long. Could not insert.\n";
+      continue;
+    case PREPARE_NEGATIVE_ID:
+      std::cout << "Negative ID. Could not insert.\n";
+      continue;
+    case PREPARE_UNRECOGNIZED_STATE:
+      std::cout << "Unrecognized keyword in '" << inputLine << "'\n";
+      continue;
     }
 
     /* execute the command */
     switch (executeCommand(command, *table)) {
-      case EXECUTE_SUCCESS:
-        std::cout << "Executed\n";
-        break;
-      case EXECUTE_TABLE_FULL:
-        std::cout << "Error: Table full.\n";
-        break;
+    case EXECUTE_SUCCESS:
+      std::cout << "Executed\n";
+      break;
+    case EXECUTE_DUPLICATE_KEY:
+      std::cout << "Duplicate key\n";
+      break;
+    case EXECUTE_TABLE_FULL:
+      std::cout << "Error: Table full.\n";
+      break;
     }
   }
 
